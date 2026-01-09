@@ -8,9 +8,13 @@ Uses Playwright with stealth techniques to avoid bot detection.
 import asyncio
 import random
 import re
+import logging
 from typing import Optional
 from dataclasses import dataclass
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
+from proxy_utils import proxy_manager
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -85,15 +89,25 @@ async def scrape_location(url: str, location_id: str, max_retries: int = 2) -> B
     user_agent = random.choice(DESKTOP_USER_AGENTS)
     
     for attempt in range(max_retries + 1):
+        proxy = await proxy_manager.get_valid_proxy()
+        if proxy:
+            logger.info(f"[{location_id}] Using proxy: {proxy}")
+        
         try:
             async with async_playwright() as p:
-                browser = await p.chromium.launch(headless=True)
+                launch_kwargs = {"headless": True}
+                if proxy:
+                    launch_kwargs["proxy"] = {"server": proxy}
+                
+                browser = await p.chromium.launch(**launch_kwargs)
                 context = await browser.new_context(
                     user_agent=user_agent,
                     viewport={"width": 1280, "height": 900},  # Desktop viewport for Popular Times
                 )
                 
                 page = await context.new_page()
+                # Increase timeout for potentially slow proxies
+                page.set_default_timeout(60000) 
                 
                 # Randomized wait before navigation (1-5 seconds)
                 await asyncio.sleep(random.uniform(1, 5))
@@ -197,6 +211,7 @@ async def scrape_location(url: str, location_id: str, max_retries: int = 2) -> B
                 )
                 
         except PlaywrightTimeout as e:
+            logger.warning(f"[{location_id}] Timeout with proxy {proxy}: {e}")
             if attempt < max_retries:
                 continue
             return BusynessData(
@@ -207,6 +222,9 @@ async def scrape_location(url: str, location_id: str, max_retries: int = 2) -> B
                 error=f"Timeout: {str(e)}"
             )
         except Exception as e:
+            logger.warning(f"[{location_id}] Error with proxy {proxy}: {e}")
+            if attempt < max_retries:
+                continue
             return BusynessData(
                 location_id=location_id,
                 live_percent=None,
