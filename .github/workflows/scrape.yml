@@ -1,34 +1,31 @@
-name: Pentagon Pizza Index Scraper
+name: Daily Pizza Index Scrape
 
 on:
   schedule:
-    # Run every 15 minutes
-    - cron: '*/15 * * * *'
-  workflow_dispatch:
-    # Allow manual trigger for testing
+    # Run every 20 minutes
+    - cron: '*/20 * * * *'
+  workflow_dispatch:  # Allow manual trigger
 
 jobs:
   scrape:
     runs-on: ubuntu-latest
     
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
       
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
       
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          playwright install chromium
-          playwright install-deps  # Install system dependencies for Chromium
-      
-      - name: Run scraper
-        run: python main.py
-        continue-on-error: true  # Don't fail the workflow if scrape has errors
-      
-      - name: Log completion
-        run: echo "Scrape completed at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      - name: Run API Fetcher
+        env:
+          BESTTIME_API_KEY: ${{ secrets.BESTTIME_API_KEY }}
+        run: |
+          python main.py
