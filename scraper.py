@@ -74,7 +74,7 @@ def parse_busyness_text(text: str) -> tuple[Optional[int], Optional[int]]:
     return live_percent, typical_percent
 
 
-async def scrape_location(url: str, location_id: str, max_retries: int = 2) -> BusynessData:
+async def scrape_location(url: str, location_id: str, max_retries: int = 5) -> BusynessData:
     """
     Scrape busyness data from a Google Maps location URL.
     

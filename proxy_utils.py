@@ -18,33 +18,29 @@ class ProxyManager:
     ]
 
     def __init__(self):
-        self.proxies: List[str] = []
-        self.last_fetch = 0
+        self.raw_proxies: List[str] = []
+        self.validated_proxies: List[str] = []
         self._lock = None
+        self._replenishing = False
 
     def _get_lock(self):
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
 
-    async def fetch_proxies(self) -> List[str]:
-        """Fetch fresh proxies and limit the list size."""
+    async def fetch_proxies(self) -> None:
+        """Fetch fresh proxies from sources and store in raw_proxies."""
         all_proxies = set()
         async with aiohttp.ClientSession() as session:
-            tasks = []
-            for source in self.SOURCES:
-                tasks.append(self._fetch_source(session, source))
-            
+            tasks = [self._fetch_source(session, source) for source in self.SOURCES]
             results = await asyncio.gather(*tasks)
             for res in results:
                 all_proxies.update(res)
         
-        proxy_list = list(all_proxies)
-        random.shuffle(proxy_list)
-        # Limit to 1000 proxies to avoid massive validation times
-        self.proxies = proxy_list[:1000]
-        logger.info(f"Initialized pool with {len(self.proxies)} proxies.")
-        return self.proxies
+        plist = list(all_proxies)
+        random.shuffle(plist)
+        self.raw_proxies = plist[:2000] # Limit pool
+        logger.info(f"Fetched {len(self.raw_proxies)} fresh proxies.")
 
     async def _fetch_source(self, session: aiohttp.ClientSession, url: str) -> List[str]:
         try:
@@ -56,45 +52,57 @@ class ProxyManager:
             logger.warning(f"Failed to fetch from {url}: {e}")
         return []
 
-    async def validate_proxy(self, proxy: str) -> Optional[str]:
-        """Test a proxy against a simple endpoint."""
-        url = "http://www.google.com"
+    async def validate_proxy(self, session: aiohttp.ClientSession, proxy: str) -> Optional[str]:
+        """Test a proxy against https://www.google.com to ensure HTTPS tunnel works."""
+        url = "https://www.google.com"
         proxy_url = f"http://{proxy}"
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, proxy=proxy_url, timeout=5) as response:
-                    if response.status == 200:
-                        return proxy_url
+            async with session.get(url, proxy=proxy_url, timeout=5) as response:
+                if response.status == 200:
+                    return proxy_url
         except Exception:
             pass
         return None
 
-    async def get_valid_proxy(self, max_attempts: int = 50, batch_size: int = 10) -> Optional[str]:
-        """Get a single validated proxy, testing in batches."""
-        async with self._get_lock():
-            if not self.proxies:
+    async def replenish_validated_pool(self, target_count: int = 5):
+        """Finds and validates multiple proxies in parallel to fill the pool."""
+        if self._replenishing:
+            return
+        
+        self._replenishing = True
+        try:
+            if not self.raw_proxies:
                 await self.fetch_proxies()
 
-            attempts = 0
-            while self.proxies and attempts < max_attempts:
-                # Take a batch of proxies to validate in parallel
-                batch = [self.proxies.pop() for _ in range(min(len(self.proxies), batch_size))]
-                attempts += len(batch)
-                
-                tasks = [self.validate_proxy(p) for p in batch]
-                results = await asyncio.gather(*tasks)
-                
-                # Return the first one that passed
-                for r in results:
-                    if r:
-                        logger.info(f"Found valid proxy: {r}")
-                        return r
-            
-            # If we ran out, re-fetch
-            if attempts >= max_attempts or not self.proxies:
-                await self.fetch_proxies()
-                if self.proxies:
-                    return await self.get_valid_proxy(max_attempts=20)
+            async with aiohttp.ClientSession() as session:
+                batch_size = 50 # Increase parallelism
+                while len(self.validated_proxies) < target_count and self.raw_proxies:
+                    batch = [self.raw_proxies.pop() for _ in range(min(len(self.raw_proxies), batch_size))]
+                    tasks = [self.validate_proxy(session, p) for p in batch]
+                    results = await asyncio.gather(*tasks)
+                    
+                    found = [r for r in results if r]
+                    if found:
+                        self.validated_proxies.extend(found)
+                        logger.info(f"Added {len(found)} validated proxies to pool. Total: {len(self.validated_proxies)}")
+                    
+        finally:
+            self._replenishing = False
+
+    async def get_valid_proxy(self) -> Optional[str]:
+        """Returns a validated proxy immediately if available, otherwise waits for replenishment."""
+        async with self._get_lock():
+            # If we have some, return one and trigger replenishment if low
+            if self.validated_proxies:
+                proxy = self.validated_proxies.pop()
+                if len(self.validated_proxies) < 3:
+                    asyncio.create_task(self.replenish_validated_pool())
+                return proxy
+
+            # If none validated, wait for a batch to be found
+            await self.replenish_validated_pool(target_count=3)
+            if self.validated_proxies:
+                return self.validated_proxies.pop()
             
         return None
 
